@@ -1,66 +1,92 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import sqlite3
 import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Trade Data Analysis", layout="wide")
+# -------------------------------
+# Generate synthetic trade data
+# -------------------------------
+def generate_fake_trades(n=1000):
+    np.random.seed(42)
+    timestamps = [datetime.now() - timedelta(minutes=i) for i in range(n)]
+    prices = np.random.normal(100, 2, n).round(2)  # mean 100, std 2
+    volumes = np.random.randint(10, 1000, n)
+    trade_ids = range(1, n+1)
 
-st.title("📊 Trade Data Analysis Dashboard")
-st.markdown("SQL + Python pipeline for liquidity and anomaly detection.")
+    df = pd.DataFrame({
+        "trade_id": trade_ids,
+        "timestamp": timestamps,
+        "price": prices,
+        "volume": volumes
+    })
+    return df
 
-# File uploader
-uploaded_file = st.file_uploader("Upload trade data (CSV)", type="csv")
+# -------------------------------
+# Run SQL queries on trade data
+# -------------------------------
+def run_sql_query(df, query):
+    conn = sqlite3.connect(":memory:")
+    df.to_sql("trades", conn, index=False, if_exists="replace")
+    result = pd.read_sql_query(query, conn)
+    conn.close()
+    return result
 
-if uploaded_file:
-    # Load CSV into DataFrame
-    df = pd.read_csv(uploaded_file)
+# -------------------------------
+# Streamlit App
+# -------------------------------
+st.set_page_config(page_title="TradeFlow Analyzer", layout="wide")
+st.title("📊 TradeFlow Analyzer")
+st.markdown("Synthetic trade data with SQL + anomaly detection")
 
-    st.subheader("Raw Data Preview")
-    st.dataframe(df.head())
+# Generate trades
+df = generate_fake_trades(5000)
 
-    # Basic checks
-    required_cols = {"trade_id", "timestamp", "price", "volume"}
-    if not required_cols.issubset(df.columns):
-        st.error(f"CSV must contain: {required_cols}")
-    else:
-        # Load into SQLite
-        conn = sqlite3.connect(":memory:")
-        df.to_sql("trades", conn, index=False, if_exists="replace")
+# Show raw data
+if st.checkbox("Show sample trades"):
+    st.dataframe(df.head(20))
 
-        st.subheader("Liquidity Patterns (SQL Query)")
-        query = """
-        SELECT 
-            strftime('%Y-%m-%d %H:00:00', timestamp) AS trade_hour,
-            SUM(volume) as total_volume,
-            AVG(price) as avg_price
-        FROM trades
-        GROUP BY trade_hour
-        ORDER BY trade_hour;
-        """
-        result = pd.read_sql(query, conn)
-        st.dataframe(result.head())
+# Run custom SQL query
+st.subheader("Run SQL on Trades")
+default_query = "SELECT AVG(price) as avg_price, SUM(volume) as total_volume FROM trades"
+query = st.text_area("Enter SQL query:", value=default_query, height=100)
 
-        # Plot liquidity over time
-        fig, ax = plt.subplots()
-        ax.plot(result["trade_hour"], result["total_volume"], marker="o")
-        plt.xticks(rotation=45)
-        ax.set_title("Liquidity (Total Volume per Hour)")
-        ax.set_ylabel("Volume")
-        st.pyplot(fig)
+if st.button("Run Query"):
+    try:
+        result = run_sql_query(df, query)
+        st.dataframe(result)
+    except Exception as e:
+        st.error(f"SQL error: {e}")
 
-        # --- Anomaly detection ---
-        st.subheader("Anomaly Detection (Python)")
-        df["z_score_volume"] = (df["volume"] - df["volume"].mean()) / df["volume"].std()
-        anomalies = df[df["z_score_volume"].abs() > 3]
+# Liquidity patterns
+st.subheader("Liquidity Patterns")
+df["minute"] = df["timestamp"].dt.floor("T")
+liquidity = df.groupby("minute")["volume"].sum().reset_index()
 
-        st.write(f"Detected {len(anomalies)} anomalous trades (|z| > 3):")
-        st.dataframe(anomalies)
+fig, ax = plt.subplots(figsize=(10,4))
+ax.plot(liquidity["minute"], liquidity["volume"], label="Total Volume per Minute")
+ax.set_title("Liquidity Over Time")
+ax.set_ylabel("Volume")
+ax.set_xlabel("Time")
+ax.legend()
+st.pyplot(fig)
 
-        # Plot anomalies
-        fig2, ax2 = plt.subplots()
-        ax2.scatter(df["timestamp"], df["volume"], alpha=0.5, label="Normal")
-        ax2.scatter(anomalies["timestamp"], anomalies["volume"], color="red", label="Anomaly")
-        plt.xticks(rotation=45)
-        ax2.set_title("Trade Volumes with Anomalies")
-        ax2.legend()
-        st.pyplot(fig2)
+# Anomaly detection: Price & Volume outliers
+st.subheader("Anomaly Detection")
+price_mean, price_std = df["price"].mean(), df["price"].std()
+outliers = df[(df["price"] > price_mean + 3*price_std) | (df["price"] < price_mean - 3*price_std)]
+
+if not outliers.empty:
+    st.warning(f"Detected {len(outliers)} abnormal trades (3σ rule)")
+    st.dataframe(outliers.head(10))
+else:
+    st.success("No price anomalies detected.")
+
+# Heatmap of price-volume correlation
+st.subheader("Price-Volume Relationship")
+fig, ax = plt.subplots()
+sns.scatterplot(data=df, x="price", y="volume", alpha=0.3, ax=ax)
+ax.set_title("Price vs Volume")
+st.pyplot(fig)
